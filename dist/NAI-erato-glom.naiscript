@@ -1,0 +1,237 @@
+/*---
+compatibilityVersion: naiscript-1.0
+id: be2503ca-d1b1-45c6-b2eb-06ba375ac1d8
+name: Erato-GLoM
+version: 0.0.0
+createdAt: 1770915596
+author: keilladraconis
+description: "Erato-GLoM - Two great tastes that taste great together! License: MIT"
+memoryLimit: 8
+updatedAt: 1770926311
+config: []
+---*/
+
+/**
+ * Erato-GLoM
+ * Built with NovelAI Script Build System
+ */
+
+(async () => {
+    // ─── Config ────────────────────────────────────────────────────────
+    const GLM_MODEL = 'glm-4-6';
+    const CONSULT_EVERY = 4; // GLM consultation every N generations
+    const GLM_MAX_TOKENS = 300;
+    const SYSTEM_PROMPT = `You are a creative writing consultant reviewing a story in progress. Your job is to produce a short directive (2-4 sentences) that will guide the story's next few paragraphs.
+
+Focus on:
+- Preventing repetitive loops or stalling
+- Advancing the plot or deepening character dynamics
+- Suggesting concrete sensory details, emotional beats, or rising tension
+- Maintaining consistency with established characters and setting
+
+Your output will be inserted directly into the story as an instruction block. Write ONLY the directive, nothing else. Use second person ("you") if the story is in second person, otherwise match the story's POV. Be specific and vivid, not generic.
+
+Example output:
+Tension rises as Oxie accidentally reveals she knows something she shouldn't. The air in the pizza shop feels suddenly heavy. Focus on body language—her ears flattening, eyes darting to the door.`;
+    // ─── State ─────────────────────────────────────────────────────────
+    let genCount = 0;
+    let instructionSectionId = null;
+    let lastGuidance = '';
+    let consulting = false;
+    let glmSignal = null;
+    // ─── Permissions ───────────────────────────────────────────────────
+    const hasDocEdit = await api.v1.permissions.request('documentEdit', 'GLoM inserts and removes instruction paragraphs to guide the story.');
+    if (!hasDocEdit) {
+        api.v1.log('WARNING: documentEdit permission denied. GLoM cannot function.');
+    }
+    // ─── Instruction Management ────────────────────────────────────────
+    async function removeInstruction() {
+        if (instructionSectionId === null)
+            return;
+        try {
+            await api.v1.document.removeParagraph(instructionSectionId);
+            api.v1.log('Removed old instruction paragraph:', instructionSectionId);
+        }
+        catch (_) {
+            api.v1.log('Old instruction already gone (undo?)');
+        }
+        instructionSectionId = null;
+    }
+    async function insertInstruction(text) {
+        if (!hasDocEdit)
+            return;
+        await removeInstruction();
+        const ids = await api.v1.document.sectionIds();
+        if (ids.length < 1)
+            return;
+        // Insert above the last paragraph so we don't cut off prose
+        if (ids.length >= 2) {
+            const beforeLastId = ids[ids.length - 2];
+            await api.v1.document.insertParagraphAfter(beforeLastId, {
+                text,
+                source: 'instruction',
+            });
+        }
+        else {
+            // Only one paragraph — insert at start
+            await api.v1.document.insertParagraphAfter(0, {
+                text,
+                source: 'instruction',
+            });
+        }
+        // The new paragraph was inserted; find its ID
+        const newIds = await api.v1.document.sectionIds();
+        // It should be second-to-last (we inserted before the last)
+        if (newIds.length >= 2) {
+            instructionSectionId = newIds[newIds.length - 2];
+        }
+        else {
+            instructionSectionId = newIds[0];
+        }
+        lastGuidance = text;
+        api.v1.log('Inserted instruction:', text.slice(0, 150));
+    }
+    // ─── GLM Consultation ─────────────────────────────────────────────
+    function cancelGLM() {
+        if (glmSignal) {
+            glmSignal.cancel();
+            glmSignal = null;
+            api.v1.log('GLM consultation cancelled.');
+        }
+    }
+    async function consultGLM() {
+        if (consulting) {
+            api.v1.log('GLM consultation already in progress, skipping');
+            return;
+        }
+        consulting = true;
+        api.v1.log('Consulting GLM...');
+        try {
+            // Read full story text, skipping any instruction paragraphs
+            const sections = await api.v1.document.scan();
+            const storyText = sections
+                .filter((s) => s.section.source !== 'instruction')
+                .map((s) => s.section.text)
+                .join('\n');
+            if (!storyText.trim()) {
+                api.v1.log('No story text to analyze.');
+                return;
+            }
+            // Truncate to last ~20000 chars to stay within GLM context
+            const contextText = storyText.length > 20000 ? '...\n' + storyText.slice(-20000) : storyText;
+            // Create a cancellation signal so the user can abort
+            const signal = await api.v1.createCancellationSignal();
+            glmSignal = signal;
+            // Blocking mode: locks the editor while GLM thinks, preventing
+            // the user from starting a new generation before we can insert.
+            const response = await api.v1.generate([
+                { role: 'system', content: SYSTEM_PROMPT },
+                {
+                    role: 'user',
+                    content: `Here is the story so far:\n\n${contextText}\n\nWrite your directive for the next few paragraphs.`,
+                },
+            ], {
+                model: GLM_MODEL,
+                max_tokens: GLM_MAX_TOKENS,
+                temperature: 0.7,
+            }, undefined, undefined, signal);
+            glmSignal = null;
+            const guidance = response.choices[0]?.text?.trim();
+            if (guidance) {
+                await insertInstruction(`[ ${guidance} ]`);
+            }
+            else {
+                api.v1.log('GLM returned empty response');
+            }
+        }
+        catch (err) {
+            api.v1.error('GLM consultation failed:', err);
+        }
+        finally {
+            glmSignal = null;
+            consulting = false;
+        }
+    }
+    // ─── UI ────────────────────────────────────────────────────────────
+    await api.v1.tempStorage.set('eg-guidance', '(none yet)');
+    await api.v1.tempStorage.set('eg-gencount', '0');
+    await api.v1.tempStorage.set('eg-enabled', true);
+    await api.v1.ui.register([
+        {
+            type: 'scriptPanel',
+            id: 'eg-panel',
+            name: 'GLoM',
+            content: [
+                {
+                    type: 'checkboxInput',
+                    id: 'eg-enabled',
+                    label: 'Enable GLoM',
+                    storageKey: 'temp:eg-enabled',
+                    initialValue: true,
+                },
+                {
+                    type: 'row',
+                    content: [
+                        {
+                            type: 'button',
+                            text: 'Consult GLM Now',
+                            callback: consultGLM,
+                            disabledWhileCallbackRunning: true,
+                        },
+                        {
+                            type: 'button',
+                            text: 'Cancel GLM',
+                            callback: cancelGLM,
+                        },
+                        {
+                            type: 'button',
+                            text: 'Remove Instruction',
+                            callback: removeInstruction,
+                            disabledWhileCallbackRunning: true,
+                        },
+                    ],
+                },
+                {
+                    type: 'text',
+                    text: 'Generations since last consult: {{temp:eg-gencount}}',
+                },
+                {
+                    type: 'text',
+                    text: 'Last guidance:\n{{temp:eg-guidance}}',
+                    style: {
+                        fontFamily: 'monospace',
+                        fontSize: '12px',
+                        whiteSpace: 'pre-wrap',
+                        padding: '8px',
+                    },
+                },
+            ],
+        },
+    ]);
+    // ─── Hooks ─────────────────────────────────────────────────────────
+    api.v1.hooks.register('onGenerationRequested', async (params) => {
+        if (params.scriptInitiated)
+            return; // Don't react to our own GLM calls
+        api.v1.log('Generation requested | model:', params.model);
+    });
+    api.v1.hooks.register('onGenerationEnd', async (params) => {
+        if (params.model === GLM_MODEL)
+            return; // Ignore GLM completions
+        const enabled = await api.v1.tempStorage.get('eg-enabled');
+        if (!enabled) {
+            api.v1.log('GLoM disabled, skipping.');
+            return;
+        }
+        genCount++;
+        await api.v1.tempStorage.set('eg-gencount', String(genCount));
+        api.v1.log('Generation ended. Count:', genCount, '/', CONSULT_EVERY);
+        if (genCount >= CONSULT_EVERY) {
+            genCount = 0;
+            await api.v1.tempStorage.set('eg-gencount', '0');
+            await consultGLM();
+            await api.v1.tempStorage.set('eg-guidance', lastGuidance || '(empty)');
+        }
+    });
+    api.v1.log('GLoM loaded. GLM consults every', CONSULT_EVERY, 'generations.');
+    api.v1.log('Use "Consult GLM Now" button to test immediately.');
+})();
