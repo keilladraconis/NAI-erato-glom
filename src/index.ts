@@ -2,10 +2,9 @@
   // ─── Config ────────────────────────────────────────────────────────
 
   const GLM_MODEL = 'glm-4-6';
-  const CONSULT_EVERY = 4; // GLM consultation every N generations
   const GLM_MAX_TOKENS = 300;
 
-  const SYSTEM_PROMPT = `You are a creative writing consultant reviewing a story in progress. Your job is to produce a short directive (2-4 sentences) that will guide the story's next few paragraphs.
+  const DEFAULT_PROMPT = `You are a creative writing consultant reviewing a story in progress. Your job is to produce a short directive (2-4 sentences) that will guide the story's next few paragraphs.
 
 Focus on:
 - Preventing repetitive loops or stalling
@@ -13,18 +12,24 @@ Focus on:
 - Suggesting concrete sensory details, emotional beats, or rising tension
 - Maintaining consistency with established characters and setting
 
-Your output will be inserted directly into the story as an instruction block. Write ONLY the directive, nothing else. Use second person ("you") if the story is in second person, otherwise match the story's POV. Be specific and vivid, not generic.
+Your output will be inserted directly into the story as an instruction block. Write ONLY the directive, nothing else. Use second person ("you") if the story is in second person, otherwise match the story's POV. Be specific and vivid, not generic.`;
 
-Example output:
-Tension rises as Oxie accidentally reveals she knows something she shouldn't. The air in the pizza shop feels suddenly heavy. Focus on body language—her ears flattening, eyes darting to the door.`;
+  // Storage keys (story:-prefixed for per-story persistence)
+  const SK_ENABLED = 'story:glom-enabled';
+  const SK_INTERVAL = 'story:glom-interval';
+  const SK_PROMPT = 'story:glom-prompt';
 
   // ─── State ─────────────────────────────────────────────────────────
 
   let genCount = 0;
   let instructionSectionId: number | null = null;
-  let lastGuidance = '';
   let consulting = false;
   let glmSignal: { cancel: () => void } | null = null;
+
+  // Initialize defaults if not yet set
+  await api.v1.storyStorage.setIfAbsent('glom-enabled', true);
+  await api.v1.storyStorage.setIfAbsent('glom-interval', 4);
+  await api.v1.storyStorage.setIfAbsent('glom-prompt', DEFAULT_PROMPT);
 
   // ─── Permissions ───────────────────────────────────────────────────
 
@@ -33,20 +38,13 @@ Tension rises as Oxie accidentally reveals she knows something she shouldn't. Th
     'GLoM inserts and removes instruction paragraphs to guide the story.'
   );
 
-  if (!hasDocEdit) {
-    api.v1.log('WARNING: documentEdit permission denied. GLoM cannot function.');
-  }
-
   // ─── Instruction Management ────────────────────────────────────────
 
   async function removeInstruction() {
     if (instructionSectionId === null) return;
     try {
       await api.v1.document.removeParagraph(instructionSectionId);
-      api.v1.log('Removed old instruction paragraph:', instructionSectionId);
-    } catch (_) {
-      api.v1.log('Old instruction already gone (undo?)');
-    }
+    } catch (_) { /* already gone */ }
     instructionSectionId = null;
   }
 
@@ -57,83 +55,58 @@ Tension rises as Oxie accidentally reveals she knows something she shouldn't. Th
     const ids = await api.v1.document.sectionIds();
     if (ids.length < 1) return;
 
-    // Insert above the last paragraph so we don't cut off prose
     if (ids.length >= 2) {
-      const beforeLastId = ids[ids.length - 2];
-      await api.v1.document.insertParagraphAfter(beforeLastId, {
+      await api.v1.document.insertParagraphAfter(ids[ids.length - 2], {
         text,
         source: 'instruction',
       });
     } else {
-      // Only one paragraph — insert at start
       await api.v1.document.insertParagraphAfter(0, {
         text,
         source: 'instruction',
       });
     }
 
-    // The new paragraph was inserted; find its ID
     const newIds = await api.v1.document.sectionIds();
-    // It should be second-to-last (we inserted before the last)
-    if (newIds.length >= 2) {
-      instructionSectionId = newIds[newIds.length - 2];
-    } else {
-      instructionSectionId = newIds[0];
-    }
-
-    lastGuidance = text;
-    api.v1.log('Inserted instruction:', text.slice(0, 150));
+    instructionSectionId = newIds.length >= 2
+      ? newIds[newIds.length - 2]
+      : newIds[0];
   }
 
   // ─── GLM Consultation ─────────────────────────────────────────────
 
-  function cancelGLM() {
-    if (glmSignal) {
-      glmSignal.cancel();
-      glmSignal = null;
-      api.v1.log('GLM consultation cancelled.');
-    }
-  }
-
   async function consultGLM() {
-    if (consulting) {
-      api.v1.log('GLM consultation already in progress, skipping');
-      return;
-    }
+    if (consulting) return;
     consulting = true;
-    api.v1.log('Consulting GLM...');
 
     try {
-      // Read full story text, skipping any instruction paragraphs
-      const sections = await api.v1.document.scan();
-      const storyText = sections
-        .filter((s) => s.section.source !== 'instruction')
-        .map((s) => s.section.text)
-        .join('\n');
+      // Build the full story context (includes lorebook, memory, AN, etc.)
+      // suppressScriptHooks: 'all' prevents side effects from other scripts
+      const storyContext = await api.v1.buildContext({
+        suppressScriptHooks: 'all',
+      });
 
-      if (!storyText.trim()) {
-        api.v1.log('No story text to analyze.');
-        return;
-      }
+      if (!storyContext.length) return;
 
-      // Truncate to last ~20000 chars to stay within GLM context
-      const contextText =
-        storyText.length > 20000 ? '...\n' + storyText.slice(-20000) : storyText;
+      // Read the user's system prompt
+      const systemPrompt: string =
+        await api.v1.storyStorage.get('glom-prompt') || DEFAULT_PROMPT;
 
-      // Create a cancellation signal so the user can abort
+      // Assemble messages with static content first for cache efficiency:
+      //   1. System prompt (static — always cached after first call)
+      //   2. Story context (stable head, volatile tail — older parts cached)
+      //   3. Instruction (short, always fresh)
+      const messages: Message[] = [
+        { role: 'system', content: systemPrompt },
+        ...storyContext,
+        { role: 'user', content: 'Write your directive for the next few paragraphs.' },
+      ];
+
       const signal = await api.v1.createCancellationSignal();
       glmSignal = signal;
 
-      // Blocking mode: locks the editor while GLM thinks, preventing
-      // the user from starting a new generation before we can insert.
       const response = await api.v1.generate(
-        [
-          { role: 'system', content: SYSTEM_PROMPT },
-          {
-            role: 'user',
-            content: `Here is the story so far:\n\n${contextText}\n\nWrite your directive for the next few paragraphs.`,
-          },
-        ],
+        messages,
         {
           model: GLM_MODEL,
           max_tokens: GLM_MAX_TOKENS,
@@ -149,11 +122,13 @@ Tension rises as Oxie accidentally reveals she knows something she shouldn't. Th
       const guidance = response.choices[0]?.text?.trim();
       if (guidance) {
         await insertInstruction(`[ ${guidance} ]`);
-      } else {
-        api.v1.log('GLM returned empty response');
       }
     } catch (err) {
-      api.v1.error('GLM consultation failed:', err);
+      if (glmSignal) {
+        glmSignal = null;
+      } else {
+        api.v1.error('GLM consultation failed:', err);
+      }
     } finally {
       glmSignal = null;
       consulting = false;
@@ -162,10 +137,6 @@ Tension rises as Oxie accidentally reveals she knows something she shouldn't. Th
 
   // ─── UI ────────────────────────────────────────────────────────────
 
-  await api.v1.tempStorage.set('eg-guidance', '(none yet)');
-  await api.v1.tempStorage.set('eg-gencount', '0');
-  await api.v1.tempStorage.set('eg-enabled', true);
-
   await api.v1.ui.register([
     {
       type: 'scriptPanel',
@@ -173,47 +144,53 @@ Tension rises as Oxie accidentally reveals she knows something she shouldn't. Th
       name: 'GLoM',
       content: [
         {
-          type: 'checkboxInput',
-          id: 'eg-enabled',
-          label: 'Enable GLoM',
-          storageKey: 'temp:eg-enabled',
-          initialValue: true,
-        },
-        {
           type: 'row',
           content: [
             {
+              type: 'checkboxInput',
+              id: 'glom-enabled',
+              label: 'Enable',
+              storageKey: SK_ENABLED,
+              initialValue: true,
+              onChange: async (enabled: boolean) => {
+                if (!enabled) await removeInstruction();
+              },
+            },
+            {
               type: 'button',
-              text: 'Consult GLM Now',
+              text: 'GLoM',
+              iconId: 'heart',
               callback: consultGLM,
-              disabledWhileCallbackRunning: true,
-            },
-            {
-              type: 'button',
-              text: 'Cancel GLM',
-              callback: cancelGLM,
-            },
-            {
-              type: 'button',
-              text: 'Remove Instruction',
-              callback: removeInstruction,
               disabledWhileCallbackRunning: true,
             },
           ],
         },
         {
-          type: 'text',
-          text: 'Generations since last consult: {{temp:eg-gencount}}',
+          type: 'sliderInput',
+          id: 'glom-interval',
+          label: 'Consultation interval',
+          storageKey: SK_INTERVAL,
+          min: 1,
+          max: 10,
+          step: 1,
+          initialValue: 4,
+          suffix: ' gens',
         },
         {
-          type: 'text',
-          text: 'Last guidance:\n{{temp:eg-guidance}}',
-          style: {
-            fontFamily: 'monospace',
-            fontSize: '12px',
-            whiteSpace: 'pre-wrap',
-            padding: '8px',
-          },
+          type: 'collapsibleSection',
+          title: 'System Prompt',
+          initialCollapsed: true,
+          storageKey: SK_PROMPT + '-collapsed',
+          content: [
+            {
+              type: 'multilineTextInput',
+              id: 'glom-prompt',
+              storageKey: SK_PROMPT,
+              initialValue: DEFAULT_PROMPT,
+              placeholder: 'Enter system prompt for GLM...',
+              style: { minHeight: '200px' },
+            },
+          ],
         },
       ],
     },
@@ -221,35 +198,19 @@ Tension rises as Oxie accidentally reveals she knows something she shouldn't. Th
 
   // ─── Hooks ─────────────────────────────────────────────────────────
 
-  api.v1.hooks.register('onGenerationRequested', async (params) => {
-    if (params.scriptInitiated) return; // Don't react to our own GLM calls
-    api.v1.log('Generation requested | model:', params.model);
-  });
-
   api.v1.hooks.register('onGenerationEnd', async (params) => {
-    if (params.model === GLM_MODEL) return; // Ignore GLM completions
+    if (params.model === GLM_MODEL) return;
 
-    const enabled = await api.v1.tempStorage.get('eg-enabled');
-    if (!enabled) {
-      api.v1.log('GLoM disabled, skipping.');
-      return;
-    }
+    const enabled = await api.v1.storyStorage.get('glom-enabled');
+    if (!enabled) return;
+
+    const interval: number =
+      (await api.v1.storyStorage.get('glom-interval')) || 4;
 
     genCount++;
-    await api.v1.tempStorage.set('eg-gencount', String(genCount));
-    api.v1.log('Generation ended. Count:', genCount, '/', CONSULT_EVERY);
-
-    if (genCount >= CONSULT_EVERY) {
+    if (genCount >= interval) {
       genCount = 0;
-      await api.v1.tempStorage.set('eg-gencount', '0');
       await consultGLM();
-      await api.v1.tempStorage.set(
-        'eg-guidance',
-        lastGuidance || '(empty)'
-      );
     }
   });
-
-  api.v1.log('GLoM loaded. GLM consults every', CONSULT_EVERY, 'generations.');
-  api.v1.log('Use "Consult GLM Now" button to test immediately.');
 })();
