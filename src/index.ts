@@ -27,7 +27,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
   let glmSignal: { cancel: () => void } | null = null;
 
   // Initialize defaults if not yet set
-  await api.v1.storyStorage.setIfAbsent('glom-enabled', true);
+  await api.v1.storyStorage.setIfAbsent('glom-enabled', false);
   await api.v1.storyStorage.setIfAbsent('glom-interval', 4);
   await api.v1.storyStorage.setIfAbsent('glom-prompt', DEFAULT_PROMPT);
 
@@ -73,6 +73,71 @@ Your output will be inserted directly into the story as an instruction block. Wr
       : newIds[0];
   }
 
+  // ─── Context Assembly ──────────────────────────────────────────────
+  // buildContext() returns empty for Erato, so we assemble context
+  // manually: lorebook entries + memory + story text + author's note.
+  // Ordered for cache efficiency: stable content first, volatile last.
+
+  async function assembleContext(): Promise<string> {
+    const parts: string[] = [];
+
+    // 1. Memory (stable background/setting info)
+    const memory = await api.v1.memory.get();
+    if (memory.trim()) {
+      parts.push(`[Memory/Setting]\n${memory}`);
+    }
+
+    // 2. Lorebook entries — always-on and keyword-matched
+    const entries = await api.v1.lorebook.entries();
+    const sections = await api.v1.document.scan();
+    const storyText = sections
+      .filter((s) => s.section.source !== 'instruction')
+      .map((s) => s.section.text)
+      .join('\n');
+
+    const storyLower = storyText.toLowerCase();
+    const activeEntries: string[] = [];
+
+    for (const entry of entries) {
+      if (!entry.enabled || !entry.text?.trim()) continue;
+
+      if (entry.forceActivation) {
+        // Always-on entry
+        activeEntries.push(entry.text);
+      } else if (entry.keys?.length) {
+        // Keyword-triggered: check if any key appears in story text
+        const matched = entry.keys.some(
+          (key) => key && storyLower.includes(key.toLowerCase())
+        );
+        if (matched) {
+          activeEntries.push(entry.text);
+        }
+      }
+    }
+
+    if (activeEntries.length) {
+      parts.push(`[Lorebook — Active Entries]\n${activeEntries.join('\n\n')}`);
+    }
+
+    // 3. Author's Note (user's style/tone guidance)
+    const an = await api.v1.an.get();
+    if (an.trim()) {
+      parts.push(`[Author's Note]\n${an}`);
+    }
+
+    // 4. Story text (volatile tail — newest content last)
+    if (storyText.trim()) {
+      // Truncate from the front if very long, keeping the recent text
+      const maxStoryChars = 60000; // ~15k tokens, leaves room for lore/memory
+      const trimmed = storyText.length > maxStoryChars
+        ? '...\n' + storyText.slice(-maxStoryChars)
+        : storyText;
+      parts.push(`[Story]\n${trimmed}`);
+    }
+
+    return parts.join('\n\n');
+  }
+
   // ─── GLM Consultation ─────────────────────────────────────────────
 
   async function consultGLM() {
@@ -80,25 +145,19 @@ Your output will be inserted directly into the story as an instruction block. Wr
     consulting = true;
 
     try {
-      // Build the full story context (includes lorebook, memory, AN, etc.)
-      // suppressScriptHooks: 'all' prevents side effects from other scripts
-      const storyContext = await api.v1.buildContext({
-        suppressScriptHooks: 'all',
-      });
+      const context = await assembleContext();
+      if (!context.trim()) return;
 
-      if (!storyContext.length) return;
-
-      // Read the user's system prompt
       const systemPrompt: string =
         await api.v1.storyStorage.get('glom-prompt') || DEFAULT_PROMPT;
 
-      // Assemble messages with static content first for cache efficiency:
-      //   1. System prompt (static — always cached after first call)
-      //   2. Story context (stable head, volatile tail — older parts cached)
+      // Message order for cache efficiency:
+      //   1. System prompt (static — always cached)
+      //   2. Context (memory/lore stable, story volatile at tail)
       //   3. Instruction (short, always fresh)
       const messages: Message[] = [
         { role: 'system', content: systemPrompt },
-        ...storyContext,
+        { role: 'user', content: context },
         { role: 'user', content: 'Write your directive for the next few paragraphs.' },
       ];
 
@@ -151,7 +210,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
               id: 'glom-enabled',
               label: 'Enable',
               storageKey: SK_ENABLED,
-              initialValue: true,
+              initialValue: false,
               onChange: async (enabled: boolean) => {
                 if (!enabled) await removeInstruction();
               },
