@@ -71,9 +71,9 @@ Confirmed experimentally: instruction paragraphs appear in Erato's context and i
 GLM never writes prose directly. It only produces short directives — plot beats, sensory suggestions, pacing corrections. Its tendency toward mechanical writing is irrelevant because the user never sees GLM's output as story text. Erato interprets the directives in its own voice.
 
 ### The user stays in control
-- Toggle on/off per story
+- Enable/disable via the scripting system's built-in toggle
 - Adjustable consultation interval (every 1-10 generations)
-- Fully customizable system prompt
+- Fully customizable system prompt (via script config in `project.yaml`)
 - Manual "GLoM" button for on-demand consultation
 - Instruction paragraphs are visually distinct in the editor
 
@@ -91,15 +91,21 @@ GLM never writes prose directly. It only produces short directives — plot beat
 
 **Cancellation support.** GLM calls use `createCancellationSignal()` so they can be interrupted if needed.
 
-### Storage Strategy
+### Storage & Configuration
 
-All settings use `storyStorage` (per-story persistence):
+**Script config** (`project.yaml` → `api.v1.config`):
+
+| Key | Type | Purpose |
+|---|---|---|
+| `system_prompt` | string (multiline) | System prompt sent to GLM. Editable in the script's settings UI. |
+
+**Per-story storage** (`storyStorage`):
 
 | Key | Type | Default | Purpose |
 |---|---|---|---|
-| `glom-enabled` | boolean | `false` | Master toggle |
 | `glom-interval` | number | `4` | Generations between consultations |
-| `glom-prompt` | string | (see below) | System prompt sent to GLM |
+
+Enable/disable is handled by the scripting system's built-in toggle — no custom checkbox needed.
 
 ### Hooks Used
 
@@ -108,17 +114,17 @@ Only `onGenerationEnd` — confirmed to fire for Erato. The GLM-only hooks (`onB
 ### UI
 
 A single script panel ("GLoM") with:
-- **Enable checkbox** — toggles automatic consultation; disabling removes any active instruction
 - **GLoM button** (heart icon) — triggers an immediate consultation regardless of the counter
 - **Interval slider** — 1 to 10 generations between automatic consultations
-- **Collapsible system prompt editor** — full multiline text input for the GLM system prompt
+
+The system prompt is configured via the script's settings (gear icon), backed by `project.yaml` config. Enable/disable uses the scripting system's built-in toggle.
 
 ## What's Been Accomplished (v0.0.0)
 
 1. **Core consultation loop** — GLM is called on a configurable interval after Erato generations, producing directive instructions that are injected into the document.
 2. **Manual context assembly** — Full context (memory, lorebook with keyword matching, author's note, story text) is built from first principles since `buildContext()` doesn't work for Erato.
 3. **Instruction lifecycle management** — Clean insert/remove cycle with section ID tracking.
-4. **Per-story UI** — Enable toggle, interval slider, manual trigger button, and editable system prompt.
+4. **Minimal UI** — Manual trigger button and interval slider. System prompt lives in script config; enable/disable defers to the scripting system.
 5. **Safety guards** — Self-trigger prevention, cancellation signals, permission requests, graceful error handling.
 
 ## Next: Thinking Tokens

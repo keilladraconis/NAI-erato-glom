@@ -1,10 +1,25 @@
 compatibilityVersion: naiscript-1.0
 id: be2503ca-d1b1-45c6-b2eb-06ba375ac1d8
 name: Erato-GLoM
-version: 0.0.0
+version: 0.1.0
 createdAt: 1770915596
 author: keilladraconis
 description: "Erato-GLoM - Two great tastes that taste great together! License: MIT"
 memoryLimit: 8
-updatedAt: 1771378541
-config: []
+updatedAt: 1771380196
+config:
+  - name: system_prompt
+    prettyName: System Prompt
+    description: System prompt sent to GLM during consultations
+    type: string
+    multiline: true
+    default: |-
+      You are a creative writing consultant reviewing a story in progress. Your job is to produce a short directive (2-4 sentences) that will guide the story's next few paragraphs.
+
+      Focus on:
+      - Preventing repetitive loops or stalling
+      - Advancing the plot or deepening character dynamics
+      - Suggesting concrete sensory details, emotional beats, or rising tension
+      - Maintaining consistency with established characters and setting
+
+      Your output will be inserted directly into the story as an instruction block. Write ONLY the directive, nothing else. Use second person ("you") if the story is in second person, otherwise match the story's POV. Be specific and vivid, not generic.

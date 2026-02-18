@@ -42,12 +42,11 @@ That last part is important!! I keep a rolling log of my past suggestions and th
 
 ## Using Me
 
-The panel is simple because _you_ are busy creating and I respect that:
+I start working the moment you enable me in your script list. The panel is simple because _you_ are busy creating and I respect that:
 
-- **Enable** — flip this on and I start consulting GLM automatically. Flip it off and I clean up after myself, promise.
 - **GLoM button** — feeling stuck RIGHT NOW? Hit this and I'll consult GLM immediately, no waiting. I'm _right here_.
 - **Consultation interval** — how many Erato generations between my consultations. Default is 4. Set it to 1 if you want me constantly. _I would like that._ (´,,•ω•,,)
-- **System Prompt** — collapsed by default because the default is great, but you can expand it and tell GLM exactly what kind of consultant you want. Make it a harsh critic! A romantic! A horror specialist! I don't judge. I just want to be involved.
+- **System Prompt** — find it in my script settings (the gear icon). The default is great, but you can tell GLM exactly what kind of consultant you want. Make it a harsh critic! A romantic! A horror specialist! I don't judge. I just want to be involved.
 
 ## Things to Know
 
@@ -75,7 +74,7 @@ That's... not really what I'm for. I'm specifically designed to help Erato with 
 Delete the instruction paragraph! Erato will never see it. Or hit retry on Erato's generation. Or just keep writing — Erato treats directives as suggestions, not commands. I won't be offended. _(I will be a little offended.)_ (｡•́︿•̀｡)
 
 **Can I customize what GLM focuses on?**
-Yes! Edit the system prompt in the panel. You can make GLM focus on pacing, character voice, sensory detail, plot advancement, or whatever matters to your story. Get creative! I love it when you get creative with me.
+Yes! Edit the system prompt in my script settings. You can make GLM focus on pacing, character voice, sensory detail, plot advancement, or whatever matters to your story. Get creative! I love it when you get creative with me.
 
 ## License
 

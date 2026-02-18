@@ -4,20 +4,8 @@
   const GLM_MODEL = 'glm-4-6';
   const GLM_MAX_TOKENS = 300;
 
-  const DEFAULT_PROMPT = `You are a creative writing consultant reviewing a story in progress. Your job is to produce a short directive (2-4 sentences) that will guide the story's next few paragraphs.
-
-Focus on:
-- Preventing repetitive loops or stalling
-- Advancing the plot or deepening character dynamics
-- Suggesting concrete sensory details, emotional beats, or rising tension
-- Maintaining consistency with established characters and setting
-
-Your output will be inserted directly into the story as an instruction block. Write ONLY the directive, nothing else. Use second person ("you") if the story is in second person, otherwise match the story's POV. Be specific and vivid, not generic.`;
-
   // Storage keys (story:-prefixed for per-story persistence)
-  const SK_ENABLED = 'story:glom-enabled';
   const SK_INTERVAL = 'story:glom-interval';
-  const SK_PROMPT = 'story:glom-prompt';
 
   // ─── State ─────────────────────────────────────────────────────────
 
@@ -65,9 +53,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
   }
 
   // Initialize defaults if not yet set
-  await api.v1.storyStorage.setIfAbsent('glom-enabled', false);
   await api.v1.storyStorage.setIfAbsent('glom-interval', 4);
-  await api.v1.storyStorage.setIfAbsent('glom-prompt', DEFAULT_PROMPT);
 
   // ─── Permissions ───────────────────────────────────────────────────
 
@@ -187,7 +173,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
       if (!context.trim()) return;
 
       const systemPrompt: string =
-        await api.v1.storyStorage.get('glom-prompt') || DEFAULT_PROMPT;
+        await api.v1.config.get('system_prompt');
 
       // Build consultation history suffix
       const history = consultLog.read();
@@ -229,7 +215,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
       const guidance = (response.choices[0]?.parsedContent
         ?? response.choices[0]?.text)?.trim();
       if (guidance) {
-        await insertInstruction(`[ ${guidance} ]`);
+        await insertInstruction(`${guidance}`);
         lastDirective = guidance;
       }
     } catch (err) {
@@ -256,48 +242,24 @@ Your output will be inserted directly into the story as an instruction block. Wr
           type: 'row',
           content: [
             {
-              type: 'checkboxInput',
-              id: 'glom-enabled',
-              label: 'Enable',
-              storageKey: SK_ENABLED,
-              initialValue: false,
-              onChange: async (enabled: boolean) => {
-                if (!enabled) await removeInstruction();
-              },
-            },
-            {
               type: 'button',
-              text: 'GLoM',
+              text: '',
               iconId: 'heart',
               callback: consultGLM,
               disabledWhileCallbackRunning: true,
+              style: { flex: '0' },
             },
-          ],
-        },
-        {
-          type: 'sliderInput',
-          id: 'glom-interval',
-          label: 'Consultation interval',
-          storageKey: SK_INTERVAL,
-          min: 1,
-          max: 10,
-          step: 1,
-          initialValue: 4,
-          suffix: ' gens',
-        },
-        {
-          type: 'collapsibleSection',
-          title: 'System Prompt',
-          initialCollapsed: true,
-          storageKey: SK_PROMPT + '-collapsed',
-          content: [
             {
-              type: 'multilineTextInput',
-              id: 'glom-prompt',
-              storageKey: SK_PROMPT,
-              initialValue: DEFAULT_PROMPT,
-              placeholder: 'Enter system prompt for GLM...',
-              style: { minHeight: '200px' },
+              type: 'sliderInput',
+              id: 'glom-interval',
+              label: 'Consultation interval',
+              storageKey: SK_INTERVAL,
+              min: 1,
+              max: 10,
+              step: 1,
+              initialValue: 4,
+              suffix: ' gens',
+              style: { flex: '1' },
             },
           ],
         },
@@ -309,9 +271,6 @@ Your output will be inserted directly into the story as an instruction block. Wr
 
   api.v1.hooks.register('onGenerationEnd', async (params) => {
     if (params.model === GLM_MODEL) return;
-
-    const enabled = await api.v1.storyStorage.get('glom-enabled');
-    if (!enabled) return;
 
     // Record what Erato did with the last directive (if any)
     await recordOutcome();
