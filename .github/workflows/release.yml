@@ -1,0 +1,56 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "project.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      - name: Get version
+        id: get_version
+        run: echo "VERSION=$(grep "^version:" project.yaml | awk '{print $2}')" >> $GITHUB_ENV
+
+      - name: Check if tag exists
+        id: check_tag
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/v${{ env.VERSION }}"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - run: npm install
+
+      - name: Build
+        if: steps.check_tag.outputs.exists == 'false'
+        run: npm run build
+
+      - name: Create Release
+        if: steps.check_tag.outputs.exists == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mv dist/NAI-erato-glom.naiscript "dist/NAI-erato-glom-v${{ env.VERSION }}.naiscript"
+          gh release create "v${{ env.VERSION }}" \
+            "dist/NAI-erato-glom-v${{ env.VERSION }}.naiscript" \
+            --title "Release v${{ env.VERSION }}" \
+            --generate-notes
