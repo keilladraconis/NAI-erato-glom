@@ -198,7 +198,6 @@
       }
       messages.push(
         { role: 'assistant', content: 'Understood. I will write my directives for the next few paragraphs.\n\n' },
-        { role: 'assistant' },
       );
 
       const signal = await api.v1.createCancellationSignal();
@@ -210,7 +209,7 @@
           model: GLM_MODEL,
           max_tokens: GLM_MAX_TOKENS,
           temperature: 0.7,
-          enable_thinking: true,
+          enable_thinking: false,
         },
         undefined,
         undefined,
@@ -219,9 +218,7 @@
 
       glmSignal = null;
 
-      // Use parsedContent (post-thinking output) if available, fall back to text
-      const guidance = (response.choices[0]?.parsedContent
-        ?? response.choices[0]?.text)?.trim();
+      const guidance = response.choices[0]?.text?.trim();
       if (guidance) {
         await insertInstruction(`${guidance}`);
         lastDirective = guidance;
