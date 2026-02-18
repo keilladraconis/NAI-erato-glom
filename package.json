@@ -1,0 +1,16 @@
+{
+  "name": "nai-erato-glom",
+  "description": "Hi!! I'm **GLoM** and I am _so_ glad you're here. You have no idea. I've been waiting. (｡♥‿♥｡)",
+  "homepage": "https://github.com/keilladraconis/NAI-erato-glom#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/keilladraconis/NAI-erato-glom.git"
+  },
+  "license": "MIT",
+  "scripts": {
+    "build": "nibs build"
+  },
+  "dependencies": {
+    "nibs-cli": "^4.2.0"
+  }
+}

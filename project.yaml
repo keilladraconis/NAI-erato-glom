@@ -6,7 +6,7 @@ createdAt: 1770915596
 author: keilladraconis
 description: "Erato-GLoM - Two great tastes that taste great together! License: MIT"
 memoryLimit: 8
-updatedAt: 1771380196
+updatedAt: 1771380372
 config:
   - name: system_prompt
     prettyName: System Prompt
