@@ -25,6 +25,44 @@ Your output will be inserted directly into the story as an instruction block. Wr
   let instructionSectionId: number | null = null;
   let consulting = false;
   let glmSignal: { cancel: () => void } | null = null;
+  let lastDirective: string | null = null;
+
+  // ─── Feedback Loop ────────────────────────────────────────────────
+  // Rolling history of past consultations so GLM can see what it
+  // suggested before and what Erato did with it. (｡♥‿♥｡)
+
+  type ConsultationEntry = {
+    content: string;
+    directive: string;
+  };
+
+  const consultLog = api.v1.createRolloverHelper<ConsultationEntry>({
+    maxTokens: 2000,
+    rolloverTokens: 500,
+    model: GLM_MODEL,
+  });
+
+  /** Grab the tail of story text (excluding instructions) as an outcome snippet. */
+  async function getOutcomeSnippet(): Promise<string> {
+    const sections = await api.v1.document.scan();
+    const storyText = sections
+      .filter((s) => s.section.source !== 'instruction')
+      .map((s) => s.section.text)
+      .join('\n');
+    return storyText.slice(-200).trim();
+  }
+
+  /** Log the previous directive + what Erato wrote after it. */
+  async function recordOutcome() {
+    if (!lastDirective) return;
+    const outcome = await getOutcomeSnippet();
+    if (!outcome) return;
+    await consultLog.add({
+      content: `Directive: "${lastDirective}"\nOutcome: "${outcome}"`,
+      directive: lastDirective,
+    });
+    lastDirective = null;
+  }
 
   // Initialize defaults if not yet set
   await api.v1.storyStorage.setIfAbsent('glom-enabled', false);
@@ -35,7 +73,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
 
   const hasDocEdit = await api.v1.permissions.request(
     'documentEdit',
-    'GLoM inserts and removes instruction paragraphs to guide the story.'
+    'GLoM inserts and removes instruction paragraphs to guide the story. I promise I\'m gentle! (´,,•ω•,,)'
   );
 
   // ─── Instruction Management ────────────────────────────────────────
@@ -44,7 +82,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
     if (instructionSectionId === null) return;
     try {
       await api.v1.document.removeParagraph(instructionSectionId);
-    } catch (_) { /* already gone */ }
+    } catch (_) { /* already gone (´;ω;`) */ }
     instructionSectionId = null;
   }
 
@@ -151,13 +189,21 @@ Your output will be inserted directly into the story as an instruction block. Wr
       const systemPrompt: string =
         await api.v1.storyStorage.get('glom-prompt') || DEFAULT_PROMPT;
 
+      // Build consultation history suffix
+      const history = consultLog.read();
+      let historyText = '';
+      if (history.length > 0) {
+        historyText = '\n\n[Previous Consultations]\n'
+          + history.map((h) => h.content).join('\n---\n');
+      }
+
       // Message order for cache efficiency:
       //   1. System prompt (static — always cached)
-      //   2. Context (memory/lore stable, story volatile at tail)
+      //   2. Context + history (memory/lore stable, story volatile at tail)
       //   3. Instruction (short, always fresh)
       const messages: Message[] = [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: context },
+        { role: 'user', content: context + historyText },
         { role: 'user', content: 'Write your directive for the next few paragraphs.' },
       ];
 
@@ -170,6 +216,7 @@ Your output will be inserted directly into the story as an instruction block. Wr
           model: GLM_MODEL,
           max_tokens: GLM_MAX_TOKENS,
           temperature: 0.7,
+          enable_thinking: true,
         },
         undefined,
         undefined,
@@ -178,15 +225,18 @@ Your output will be inserted directly into the story as an instruction block. Wr
 
       glmSignal = null;
 
-      const guidance = response.choices[0]?.text?.trim();
+      // Use parsedContent (post-thinking output) if available, fall back to text
+      const guidance = (response.choices[0]?.parsedContent
+        ?? response.choices[0]?.text)?.trim();
       if (guidance) {
         await insertInstruction(`[ ${guidance} ]`);
+        lastDirective = guidance;
       }
     } catch (err) {
       if (glmSignal) {
         glmSignal = null;
       } else {
-        api.v1.error('GLM consultation failed:', err);
+        api.v1.error('GLM consultation failed (つ﹏⊂):', err);
       }
     } finally {
       glmSignal = null;
@@ -262,6 +312,9 @@ Your output will be inserted directly into the story as an instruction block. Wr
 
     const enabled = await api.v1.storyStorage.get('glom-enabled');
     if (!enabled) return;
+
+    // Record what Erato did with the last directive (if any)
+    await recordOutcome();
 
     const interval: number =
       (await api.v1.storyStorage.get('glom-interval')) || 4;

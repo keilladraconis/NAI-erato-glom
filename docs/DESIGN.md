@@ -121,11 +121,195 @@ A single script panel ("GLoM") with:
 4. **Per-story UI** — Enable toggle, interval slider, manual trigger button, and editable system prompt.
 5. **Safety guards** — Self-trigger prevention, cancellation signals, permission requests, graceful error handling.
 
+## Next: Thinking Tokens
+
+### The Opportunity
+
+`GenerationParams` supports `enable_thinking: true`. When enabled, GLM gets an internal chain-of-thought phase before producing output. The response separates into:
+
+- `parsedReasoning` — GLM's internal analysis (invisible to user and Erato)
+- `parsedContent` — the directive that gets injected
+
+This means GLM can deeply analyze pacing, consistency, character dynamics, repetition patterns, and narrative trajectory *in its head*, then emit only a crisp, targeted directive. The reasoning phase is essentially free — it doesn't inflate the instruction paragraph or consume the user's attention.
+
+### Why This Matters for GLoM Specifically
+
+The current single-prompt approach asks GLM to do everything at once in 300 tokens: read the story, identify problems, prioritize concerns, and write a directive. With thinking enabled, GLM can:
+
+1. Inventory what's happening (characters present, setting, mood, conflict)
+2. Check for repetition or stalling patterns
+3. Consider what the user's Author's Note and Memory suggest they want
+4. Evaluate what lorebook entries are active and what they imply
+5. Decide which concern is most urgent *right now*
+6. Craft a directive that addresses that specific concern
+
+All of steps 1-5 happen in reasoning tokens. Only step 6 becomes the directive. This is effectively "multiple personalities" without any UI complexity — GLM considers all editorial lenses in its thinking and picks the right one.
+
+### Implementation
+
+Minimal change to `consultGLM()`:
+
+```typescript
+const response = await api.v1.generate(
+  messages,
+  {
+    model: GLM_MODEL,
+    max_tokens: GLM_MAX_TOKENS,
+    temperature: 0.7,
+    enable_thinking: true,   // <-- one flag
+  },
+  undefined,
+  undefined,
+  signal
+);
+
+// Use parsedContent (post-thinking output) if available, fall back to text
+const guidance = (response.choices[0]?.parsedContent
+  ?? response.choices[0]?.text)?.trim();
+```
+
+### Rate Limit Consideration
+
+Thinking tokens consume output token budget (2,048 tokens per 4 minutes per script). With thinking enabled, a single consultation may use 500-800 tokens (reasoning + directive) instead of 300. This reduces max consultations from ~6 to ~3 per 4-minute window. At an interval of 4 generations, that's still 12 Erato generations before hitting limits — fine for normal writing pace. If needed, `api.v1.script.waitForAllowedOutput(n)` can gate consultations until budget replenishes.
+
+## Next: Feedback Loop via RolloverHelper
+
+### The Problem
+
+Currently, each GLM consultation is stateless. GLM sees the story and writes a directive, but has no memory of:
+- What it suggested last time
+- Whether Erato followed that suggestion
+- What narrative arc is developing across consultations
+- Which types of directives are effective vs. ignored
+
+This means GLM can repeat itself, contradict its own earlier guidance, or miss that a problem it flagged was already resolved.
+
+### The Solution: Rolling Consultation History
+
+The scripting API provides `api.v1.createRolloverHelper()` — a sliding-window buffer that automatically manages items within a token budget, trimming oldest entries when the budget is exceeded. We use this to maintain a log of past consultations that GLM sees on every call.
+
+Each entry in the log captures:
+1. The directive GLM gave
+2. A snippet of what Erato wrote afterward (the "outcome")
+
+GLM sees this history and naturally:
+- Avoids repeating directives that were just given
+- Notices when directives were followed vs. ignored
+- Builds on successful guidance ("last time I suggested tension — good, now escalate it")
+- Develops an organic sense of story trajectory without a separate "beats" system
+
+### Data Structure
+
+```typescript
+type ConsultationEntry = {
+  content: string;    // Required by RolloverHelper — the formatted log entry
+  directive: string;  // The raw directive text (for reference)
+};
+```
+
+Each `content` string is formatted as:
+
+```
+Directive: "Introduce the sound of dripping water to break the oppressive silence."
+Outcome: "...water dripped from somewhere above, each drop a small percussion..."
+---
+Directive: "Elena's hand should brush the letter — don't let her read it yet."
+Outcome: "...her fingers caught the edge of the envelope, but Marcus called..."
+```
+
+### Implementation Sketch
+
+```typescript
+// Create at script init — 2000 tokens keeps ~8-10 consultation entries
+const consultLog = api.v1.createRolloverHelper<ConsultationEntry>({
+  maxTokens: 2000,
+  rolloverTokens: 500,
+  model: GLM_MODEL,
+});
+
+// Track the last directive so we can pair it with its outcome
+let lastDirective: string | null = null;
+```
+
+**In `onGenerationEnd` (before consulting GLM):** capture what Erato wrote since the last directive. This is the "outcome" — proof of whether the directive landed.
+
+```typescript
+// Grab the last ~200 chars of story text as the outcome snippet
+const sections = await api.v1.document.scan();
+const storyText = sections
+  .filter(s => s.section.source !== 'instruction')
+  .map(s => s.section.text)
+  .join('\n');
+const outcome = storyText.slice(-200).trim();
+
+if (lastDirective && outcome) {
+  await consultLog.add({
+    content: `Directive: "${lastDirective}"\nOutcome: "${outcome}"`,
+    directive: lastDirective,
+  });
+}
+```
+
+**In `consultGLM()`:** include the history in the messages sent to GLM.
+
+```typescript
+const history = consultLog.read();
+let historyText = '';
+if (history.length > 0) {
+  historyText = '\n\n[Previous Consultations]\n'
+    + history.map(h => h.content).join('\n---\n');
+}
+
+const messages: Message[] = [
+  { role: 'system', content: systemPrompt },
+  { role: 'user', content: context + historyText },
+  { role: 'user', content: 'Write your directive for the next few paragraphs.' },
+];
+```
+
+**After GLM responds:** store the directive for pairing with the next outcome.
+
+```typescript
+const guidance = (response.choices[0]?.parsedContent
+  ?? response.choices[0]?.text)?.trim();
+if (guidance) {
+  await insertInstruction(`[ ${guidance} ]`);
+  lastDirective = guidance;
+}
+```
+
+### Why RolloverHelper Instead of a Simple Array
+
+- **Automatic token management.** The helper counts tokens using GLM's tokenizer and trims old entries when the budget is exceeded. No manual bookkeeping.
+- **Graceful degradation.** As the story gets longer and consultations accumulate, old history silently falls off. The most recent 8-10 consultations stay; ancient ones are forgotten. This mirrors how a human editor's memory works.
+- **Cache-friendly.** The history text is appended to the context message, which means the system prompt and story context still benefit from prompt caching. Only the history suffix changes between consultations.
+
+### What This Replaces
+
+This feedback loop eliminates the need for:
+- A separate "story beats" or outline system (the consultation history IS the narrative thread)
+- Multiple switchable GLM personalities (thinking tokens handle editorial prioritization)
+- Complex state tracking across consultations (the RolloverHelper manages it)
+
+## Other Ideas Explored (Not Planned)
+
+These were considered during research but deferred to keep GLoM simple and lightweight:
+
+- **CommentBot personality** — Surface directives through the HypeBot as a named character ("Muse"). Fun but adds a second output channel to explain to users.
+- **Toast notifications** — `api.v1.ui.toast()` when consultation fires. Trivial to add later if wanted.
+- **`onDocumentConvertedToText` hook** — Fires for Erato. Could modify context text without changing the document. Powerful but needs experimentation to understand what Erato actually sees.
+- **Context menu / Toolbox integration** — Right-click "Ask GLoM" or Writer's Toolbox option for on-demand analysis of selected text. Good v2 feature.
+- **`generateWithStory()` shortcut** — Won't work because `buildContext()` returns empty when the story is configured for Erato. Manual context assembly remains necessary.
+- **`[ S: 5 ]` quality tags** — Erato supports quality ratings. Could inject `[ S: 5 ]` to push for higher quality prose. Needs testing.
+- **Lorebook manipulation** — Creating/modifying lorebook entries programmatically. Too invasive; conflicts with users' own lorebook setups.
+- **Rotating focus lenses** — Cycling the request message through pacing/sensory/character/consistency focuses. Probably unnecessary with thinking tokens enabled, since GLM handles prioritization internally.
+
 ## Known Limitations and Open Questions
 
 - **No token counting.** Context is truncated by character count (60k chars ~15k tokens) rather than actual token measurement. The tokenizer API (`api.v1.tokenizer`) could be used for precision.
 - **Keyword matching is naive.** Lorebook entries are matched with simple `includes()` on lowercased text. NovelAI's native lorebook matching may be more sophisticated (regex, proximity, etc.).
-- **No feedback loop.** GLM has no way to know whether its previous directive was effective. A future version could include the previous instruction and the text Erato generated in response.
 - **Fixed GLM parameters.** Temperature (0.7) and max tokens (300) are hardcoded. These could be exposed as user settings.
 - **No streaming.** GLM responses are awaited in full. Streaming via the callback parameter could provide progress indication.
 - **Instruction positioning is static.** Always second-to-last paragraph. Might benefit from smarter positioning based on document structure.
+- **Thinking token budget.** With `enable_thinking`, consultations use more output tokens. Need to monitor whether the 2,048/4min budget becomes a bottleneck in practice and consider gating with `waitForAllowedOutput()`.
+- **Outcome snippet quality.** The feedback loop captures the last ~200 chars of story text as the "outcome." This is crude — it might capture mid-sentence fragments or miss the relevant passage if several paragraphs were generated. Could be improved by tracking the document state at directive insertion time and diffing against current state.
