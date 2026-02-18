@@ -1,12 +1,12 @@
 compatibilityVersion: naiscript-1.0
 id: be2503ca-d1b1-45c6-b2eb-06ba375ac1d8
 name: Erato-GLoM
-version: 0.1.0
+version: 0.1.1
 createdAt: 1770915596
 author: keilladraconis
 description: "Erato-GLoM - Two great tastes that taste great together! License: MIT"
 memoryLimit: 8
-updatedAt: 1771380372
+updatedAt: 1771381700
 config:
   - name: system_prompt
     prettyName: System Prompt

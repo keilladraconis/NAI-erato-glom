@@ -185,13 +185,21 @@
 
       // Message order for cache efficiency:
       //   1. System prompt (static — always cached)
-      //   2. Context + history (memory/lore stable, story volatile at tail)
-      //   3. Instruction (short, always fresh)
+      //   2. Context (memory/lore stable, story volatile at tail)
+      //   3. History (if any — separate message so context boundary is clean)
+      //   4. Instruction (short, always fresh)
+      //   5. Assistant prefill to anchor English output and trigger thinking
       const messages: Message[] = [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: context + historyText },
-        { role: 'user', content: 'Write your directive for the next few paragraphs.' },
+        { role: 'user', content: context + "\n\n" },
       ];
+      if (historyText) {
+        messages.push({ role: 'user', content: historyText + "\n\n" });
+      }
+      messages.push(
+        { role: 'assistant', content: 'Understood. I will write my directives for the next few paragraphs.\n\n' },
+        { role: 'assistant' },
+      );
 
       const signal = await api.v1.createCancellationSignal();
       glmSignal = signal;
