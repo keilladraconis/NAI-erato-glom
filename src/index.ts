@@ -1,34 +1,32 @@
+import { GenX, type MessageFactory } from 'nai-gen-x';
+
 (async () => {
   // ─── Config ────────────────────────────────────────────────────────
 
   const GLM_MODEL = 'glm-4-6';
   const GLM_MAX_TOKENS = 300;
 
-  // Storage keys (story:-prefixed for per-story persistence)
+  // Storage keys
   const SK_INTERVAL = 'story:glom-interval';
+  const SK_HISTORY = 'glom-history';
 
   // ─── State ─────────────────────────────────────────────────────────
 
   let genCount = 0;
   let instructionSectionId: number | null = null;
-  let consulting = false;
-  let glmSignal: { cancel: () => void } | null = null;
   let lastDirective: string | null = null;
+
+  const genX = new GenX();
 
   // ─── Feedback Loop ────────────────────────────────────────────────
   // Rolling history of past consultations so GLM can see what it
   // suggested before and what Erato did with it. (｡♥‿♥｡)
+  // Stored in historyStorage so it stays coherent across undo/redo.
 
   type ConsultationEntry = {
     content: string;
     directive: string;
   };
-
-  const consultLog = api.v1.createRolloverHelper<ConsultationEntry>({
-    maxTokens: 2000,
-    rolloverTokens: 500,
-    model: GLM_MODEL,
-  });
 
   /** Grab the tail of story text (excluding instructions) as an outcome snippet. */
   async function getOutcomeSnippet(): Promise<string> {
@@ -45,10 +43,21 @@
     if (!lastDirective) return;
     const outcome = await getOutcomeSnippet();
     if (!outcome) return;
-    await consultLog.add({
+
+    // Load existing entries, enforce token budget via RolloverHelper, save back.
+    const existing: ConsultationEntry[] =
+      await api.v1.historyStorage.getOrDefault(SK_HISTORY, []);
+    const helper = api.v1.createRolloverHelper<ConsultationEntry>({
+      maxTokens: 2000,
+      rolloverTokens: 500,
+      model: GLM_MODEL,
+    });
+    for (const entry of existing) await helper.add(entry);
+    await helper.add({
       content: `Directive: "${lastDirective}"\nOutcome: "${outcome}"`,
       directive: lastDirective,
     });
+    await api.v1.historyStorage.set(SK_HISTORY, helper.read());
     lastDirective = null;
   }
 
@@ -165,46 +174,52 @@
   // ─── GLM Consultation ─────────────────────────────────────────────
 
   async function consultGLM() {
-    if (consulting) return;
-    consulting = true;
+    if (genX.state.status !== 'idle') return;
 
-    try {
+    const factory: MessageFactory = async () => {
       const context = await assembleContext();
-      if (!context.trim()) return;
+      if (!context.trim()) throw new Error('No context available');
 
-      const systemPrompt: string =
-        await api.v1.config.get('system_prompt');
-
-      // Build consultation history suffix
-      const history = consultLog.read();
-      let historyText = '';
-      if (history.length > 0) {
-        historyText = '\n\n[Previous Consultations]\n'
-          + history.map((h) => h.content).join('\n---\n');
-      }
+      const systemPrompt: string = await api.v1.config.get('system_prompt');
 
       // Message order for cache efficiency:
-      //   1. System prompt (static — always cached)
+      //   1. System prompt (static — always cached)        [head pin]
       //   2. Context (memory/lore stable, story volatile at tail)
       //   3. History (if any — separate message so context boundary is clean)
-      //   4. Instruction (short, always fresh)
-      //   5. Assistant prefill to anchor English output and trigger thinking
+      //   4. Assistant prefill to anchor English output    [tail pin]
       const messages: Message[] = [
         { role: 'system', content: systemPrompt },
-        { role: 'user', content: context + "\n\n" },
+        { role: 'user', content: context + '\n\n' },
       ];
-      if (historyText) {
-        messages.push({ role: 'user', content: historyText + "\n\n" });
+
+      const history: ConsultationEntry[] =
+        await api.v1.historyStorage.getOrDefault(SK_HISTORY, []);
+      if (history.length > 0) {
+        const historyText = '[Previous Consultations]\n'
+          + history.map((h) => h.content).join('\n---\n');
+        messages.push({ role: 'user', content: historyText + '\n\n' });
       }
-      messages.push(
-        { role: 'assistant', content: 'Understood. I will write my directives for the next few paragraphs.\n\n' },
-      );
 
-      const signal = await api.v1.createCancellationSignal();
-      glmSignal = signal;
+      const nudge: string = await api.v1.storyStorage.getOrDefault('glom-nudge', '');
+      if (nudge.trim()) {
+        messages.push({ role: 'user', content: `[User Direction]\n${nudge.trim()}\n\n` });
+      }
 
-      const response = await api.v1.generate(
+      messages.push({
+        role: 'assistant',
+        content: 'Understood. I will write my directives for the next few paragraphs.\n\n',
+      });
+
+      return {
         messages,
+        contextPinning: { head: 1, tail: 1 },
+      };
+    };
+
+    try {
+      const signal = await api.v1.createCancellationSignal();
+      const response = await genX.generate(
+        factory,
         {
           model: GLM_MODEL,
           max_tokens: GLM_MAX_TOKENS,
@@ -213,25 +228,17 @@
         },
         undefined,
         undefined,
-        signal
+        signal,
       );
-
-      glmSignal = null;
 
       const guidance = response.choices[0]?.text?.trim();
       if (guidance) {
-        await insertInstruction(`${guidance}`);
+        await insertInstruction(guidance);
         lastDirective = guidance;
       }
     } catch (err) {
-      if (glmSignal) {
-        glmSignal = null;
-      } else {
-        api.v1.error('GLM consultation failed (つ﹏⊂):', err);
-      }
-    } finally {
-      glmSignal = null;
-      consulting = false;
+      if (String(err) === 'Cancelled') return;
+      api.v1.error('GLM consultation failed (つ﹏⊂):', err);
     }
   }
 
@@ -243,6 +250,13 @@
       id: 'eg-panel',
       name: 'GLoM',
       content: [
+        {
+          type: 'multilineTextInput',
+          label: '',
+          placeholder: 'Suggest a direction for GLoM to introduce...',
+          storageKey: 'story:glom-nudge',
+          style: { "min-height": "2rem" }
+        },
         {
           type: 'row',
           content: [
