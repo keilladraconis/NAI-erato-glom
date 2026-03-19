@@ -203,6 +203,7 @@ import { GenX, type MessageFactory } from 'nai-gen-x';
       const nudge: string = await api.v1.storyStorage.getOrDefault('glom-nudge', '');
       if (nudge.trim()) {
         messages.push({ role: 'user', content: `[User Direction]\n${nudge.trim()}\n\n` });
+        await api.v1.storyStorage.remove('glom-nudge')
       }
 
       messages.push({

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.0] - 2026-03-19
+
+### Changed
+- **Nudge** - cleared after GLoM consultation. A compromise against adding more UI to glom because GLoM is getting chubb.
+
 ## [0.2.0] - 2026-03-18
 
 ### Added
