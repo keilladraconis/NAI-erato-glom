@@ -3,7 +3,7 @@ import { GenX, type MessageFactory } from 'nai-gen-x';
 (async () => {
   // ─── Config ────────────────────────────────────────────────────────
 
-  const GLM_MODEL = 'glm-4-6';
+  const GLM_MODEL = await api.v1.config.get('model') || 'glm-4-6';
   const GLM_MAX_TOKENS = 300;
 
   // Storage keys

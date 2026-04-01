@@ -1,5 +1,8 @@
 # Changelog
 
+## [0.4.0] - 2026-4-1
+- **Xialong** - Added xialong support as a config option. Enable it if you're an Opus subscriber. Not guaranteed to work for lower subscriptions.
+
 ## [0.3.0] - 2026-03-19
 
 ### Changed

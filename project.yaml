@@ -1,13 +1,23 @@
 compatibilityVersion: naiscript-1.0
 id: be2503ca-d1b1-45c6-b2eb-06ba375ac1d8
 name: Erato-GLoM
-version: 0.3.0
+version: 0.4.0
 createdAt: 1770915596
 author: keilladraconis
 description: "Erato-GLoM - Two great tastes that taste great together! License: MIT"
 memoryLimit: 8
-updatedAt: 1773927351
+updatedAt: 1775049171
 config:
+  - name: model
+    prettyName: Model
+    description: Model to use for GLoMmming. Only GLMmm models supported. Yumm.
+    type: select
+    default: glm-4-6
+    options:
+      - label: GLM 4.6
+        value: glm-4-6
+      - label: Xialong
+        value: xialong-v1
   - name: system_prompt
     prettyName: System Prompt
     description: System prompt sent to GLM during consultations
